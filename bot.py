@@ -299,7 +299,7 @@ class ApprovalView(discord.ui.View):
         await interaction.response.edit_message(content=f"You denied verification for {self.ign}.", view=None)
 
 # Bot token
-DISCORD_TOKEN = "MTQ1MDk4Nzc1NjM2NzkwOTA0OA.GyxTEF.0VTvYqDK2NKrmzeakufB6RiTF5AgKltgfS0wbs"
+DISCORD_TOKEN = "harharscrewu"
 
 @bot.event
 async def on_ready():
@@ -489,3 +489,4 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
 # Run bot
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
