@@ -2,8 +2,12 @@ import os
 import sys
 import argparse
 import subprocess
+from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+# Get script directory for file operations
+SCRIPT_DIR = Path(__file__).parent.absolute()
 
 # -------------------
 # CLI arguments
@@ -15,13 +19,14 @@ args = parser.parse_args()
 
 USERNAME = args.username
 FIRST_RUN = args.firstrun
-EXCEL_FILE = "sheep_wars_stats.xlsx"
+EXCEL_FILE = str(SCRIPT_DIR / "sheep_wars_stats.xlsx")
 
 # -------------------
 # Fetch stats via get.py
 # -------------------
 print(f"[LOADING] Fetching stats for {USERNAME} via get.py...")
-result = subprocess.run([sys.executable, "get.py", "-ign", USERNAME], 
+result = subprocess.run([sys.executable, str(SCRIPT_DIR / "get.py"), "-ign", USERNAME], 
+                       cwd=str(SCRIPT_DIR),
                        capture_output=True, text=True)
 
 if result.returncode != 0:

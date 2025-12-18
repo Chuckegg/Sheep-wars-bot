@@ -4,8 +4,17 @@ from datetime import datetime
 import re
 import os
 import argparse
+import time
+import random
+import json
+import gzip
+from io import BytesIO
+from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+# Get script directory for file operations
+SCRIPT_DIR = Path(__file__).parent.absolute()
 
 # -------------------
 # CLI arguments
@@ -18,20 +27,245 @@ parser.add_argument("-daily", action="store_true", help="Log snapshot into Daily
 parser.add_argument("-weekly", action="store_true", help="Log snapshot into Weekly Stats section")
 parser.add_argument("-monthly", action="store_true", help="Log snapshot into Monthly Stats section")
 parser.add_argument("-refresh", action="store_true", help="Refresh all stats with deltas from snapshots")
+parser.add_argument("-proxy", action="store_true", help="Use proxy rotation from ProxyScrape")
+parser.add_argument("-noproxy", action="store_true", help="Disable proxies (direct connection only)")
 args = parser.parse_args()
 
 USERNAME = args.username
 URL = f"https://plancke.io/hypixel/player/stats/{USERNAME}"
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-EXCEL_FILE = "sheep_wars_stats.xlsx"
+# Rotating user agents to appear more like different browsers
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+]
+
+HEADERS = {
+    "User-Agent": random.choice(USER_AGENTS),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0",
+}
+
+EXCEL_FILE = str(SCRIPT_DIR / "sheep_wars_stats.xlsx")
 SHEET_NAME = "Sheep Wars historical data"
+PROXY_CACHE_FILE = str(SCRIPT_DIR / "proxy_cache.json")
+PROXYSCRAPE_API_KEY = os.environ.get("PROXYSCRAPE_API_KEY") or os.environ.get("PROXYSCRAPE_KEY") or "f3g7edlwjly872gzdaai"
 
 # -------------------
-# Fetch page
+# Proxy Management
 # -------------------
-response = requests.get(URL, headers=HEADERS, timeout=15)
-response.raise_for_status()
+def fetch_proxies_from_proxyscrape():
+    """Fetch proxies, preferring ProxyScrape with API key; fallback to free sources"""
+    try:
+        print("[PROXY] Fetching proxies...")
+
+        candidates = []
+        # Paid/API-keyed endpoints first (if key provided). Avoid premium-only 'format' param.
+        if PROXYSCRAPE_API_KEY:
+            candidates.append(
+                f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=15000&country=all&ssl=all&anonymity=all&apikey={PROXYSCRAPE_API_KEY}"
+            )
+            candidates.append(
+                f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=15000&country=all&ssl=all&anonymity=all&apikey={PROXYSCRAPE_API_KEY}"
+            )
+
+        # Free endpoint fallback (no apikey, no 'format' param)
+        candidates.append("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all")
+        candidates.append("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all")
+        # Secondary free source (plaintext list)
+        candidates.append("https://www.proxy-list.download/api/v1/get?type=http")
+
+        for url in candidates:
+            try:
+                response = requests.get(url, timeout=15)
+                if response.status_code != 200:
+                    print(f"[PROXY] {url} -> HTTP {response.status_code}")
+                    continue
+
+                text = response.text.strip()
+
+                # Parse plaintext for both ProxyScrape and proxy-list.download
+                if 'proxy-list.download' in url:
+                    # Endpoint returns plaintext host:port per line
+                    proxies = [p.strip() for p in text.split('\n') if p.strip() and ':' in p]
+                else:
+                    # ProxyScrape endpoints default to plaintext if 'format' is omitted
+                    # Filter out any error messages
+                    if 'format are premium features' in text.lower():
+                        proxies = []
+                    else:
+                        proxies = [p.strip() for p in text.split('\n') if p.strip() and ':' in p and not p.startswith('{')]
+
+                if proxies:
+                    print(f"[PROXY] Fetched {len(proxies)} proxies from {url.split('/')[2]}")
+                    return proxies
+                else:
+                    print(f"[PROXY] No proxies returned from {url.split('/')[2]} (first 120 chars: {text[:120]!r})")
+            except Exception as e:
+                print(f"[PROXY] Error calling {url}: {e}")
+                continue
+
+        print("[PROXY] Could not fetch proxies from any source")
+        return []
+
+    except Exception as e:
+        print(f"[PROXY] Error fetching proxies: {e}")
+        return []
+
+def load_cached_proxies():
+    """Load proxies from cache file"""
+    if os.path.exists(PROXY_CACHE_FILE):
+        try:
+            with open(PROXY_CACHE_FILE, 'r') as f:
+                data = json.load(f)
+                # Check if cache is less than 1 hour old
+                if time.time() - data.get('timestamp', 0) < 3600:
+                    print(f"[PROXY] Loaded {len(data.get('proxies', []))} cached proxies")
+                    return data.get('proxies', [])
+        except Exception as e:
+            print(f"[PROXY] Error loading cache: {e}")
+    return []
+
+def save_proxy_cache(proxies):
+    """Save working proxies to cache"""
+    try:
+        with open(PROXY_CACHE_FILE, 'w') as f:
+            json.dump({
+                'timestamp': time.time(),
+                'proxies': proxies
+            }, f)
+    except Exception as e:
+        print(f"[PROXY] Error saving cache: {e}")
+
+def test_proxy(proxy, test_url="https://httpbin.org/ip", timeout=10):
+    """Test if a proxy supports HTTPS CONNECT by performing an HTTPS request."""
+    try:
+        proxy_dict = {
+            'http': f'http://{proxy}',
+            'https': f'http://{proxy}',
+        }
+        r = requests.get(test_url, proxies=proxy_dict, timeout=timeout)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+def get_working_proxies(max_test=30):
+    """Get a list of working HTTPS-capable proxies.
+    Tries cache first; if none work, fetches fresh list and retries.
+    """
+    def test_list(proxies_list):
+        if not proxies_list:
+            return []
+        print(f"[PROXY] Testing up to {max_test} proxies for HTTPS...")
+        random.shuffle(proxies_list)
+        found = []
+        for proxy in proxies_list[:max_test]:
+            if test_proxy(proxy):
+                found.append(proxy)
+                print(f"[PROXY] [OK] {proxy}")
+                if len(found) >= 5:
+                    break
+            else:
+                print(f"[PROXY] [FAIL] {proxy}")
+        return found
+
+    # Try cache
+    proxies = load_cached_proxies()
+    used_cache = bool(proxies)
+    working = test_list(proxies)
+
+    # If cache failed, fetch fresh list and retry
+    if not working:
+        if used_cache:
+            print("[PROXY] Cached proxies failed; fetching fresh list...")
+        proxies = fetch_proxies_from_proxyscrape()
+        working = test_list(proxies)
+
+    if working:
+        save_proxy_cache(working)
+    return working
+
+# Initialize proxy pool if enabled
+PROXY_POOL = []
+if args.proxy and not args.noproxy:
+    PROXY_POOL = get_working_proxies()
+    if PROXY_POOL:
+        print(f"[PROXY] Ready with {len(PROXY_POOL)} working proxies")
+    else:
+        print("[PROXY] No working proxies found, will use direct connection")
+
+# -------------------
+# Fetch page with retry logic
+# -------------------
+def fetch_with_retry(url, headers, max_retries=3, initial_delay=2, use_proxies=True, request_timeout=20):
+    """Fetch URL with exponential backoff retry logic and optional proxy rotation"""
+    # Create a session for better request handling
+    session = requests.Session()
+    proxies_to_try = PROXY_POOL.copy() if (use_proxies and PROXY_POOL) else [None]
+    
+    for attempt in range(max_retries):
+        # Rotate through proxies
+        proxy = None
+        proxy_dict = None
+        
+        if proxies_to_try and proxies_to_try[0] is not None:
+            proxy = random.choice(proxies_to_try)
+            proxy_dict = {
+                'http': f'http://{proxy}',
+                'https': f'http://{proxy}'
+            }
+            print(f"  Using proxy: {proxy}")
+        
+        try:
+            # Random delay between requests
+            if attempt > 0:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"  Retry {attempt}/{max_retries} - waiting {delay:.1f}s...")
+                time.sleep(delay)
+            else:
+                # Small random delay even on first attempt to appear more human
+                time.sleep(random.uniform(0.5, 2.0))
+            
+            response = session.get(url, headers=headers, proxies=proxy_dict, timeout=request_timeout)
+            response.raise_for_status()
+            return response
+            
+        except requests.exceptions.RequestException as e:
+            print(f"  Request failed: {e}")
+            
+            # If proxy failed, remove it from the list and try another
+            if proxy and proxy in proxies_to_try:
+                proxies_to_try.remove(proxy)
+                print(f"  Removing failed proxy: {proxy}")
+            
+            # If no more proxies or on last attempt, try direct connection
+            if not proxies_to_try or attempt == max_retries - 1:
+                if proxy_dict:  # We were using proxies, try direct now
+                    print("  Trying direct connection...")
+                    proxies_to_try = [None]
+                    continue
+                else:
+                    raise
+        finally:
+            session.close()
+    
+    return None
+
+response = fetch_with_retry(URL, HEADERS)
+if response is None:
+    raise RuntimeError("Network fetch failed after retries (proxies + direct). Try again later or use -noproxy.")
+# requests handles gzip automatically with response.text
 soup = BeautifulSoup(response.text, "html.parser")
 
 text = soup.get_text("\n")
@@ -54,9 +288,15 @@ match = pattern.search(text)
 
 if not match:
     print(f"[ERROR] Sheep Wars stats NOT found for {USERNAME}")
+    print(f"[DEBUG] Page length: {len(text)} characters")
+    print(f"[DEBUG] First 500 chars of page:")
+    print(text[:500])
     idx = text.find("Sheep Wars")
     if idx != -1:
+        print(f"\n[DEBUG] Found 'Sheep Wars' at position {idx}")
         print(text[idx:idx + 800])
+    else:
+        print(f"\n[DEBUG] 'Sheep Wars' text not found in page")
     raise RuntimeError("Extraction failed")
 
 wins, losses, wl, kills, deaths, kd = match.groups()

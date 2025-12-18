@@ -7,6 +7,10 @@ import os
 import re
 from zoneinfo import ZoneInfo
 import json
+from pathlib import Path
+
+# Get the directory where bot.py is located
+BOT_DIR = Path(__file__).parent.absolute()
 
 # sanitize output for Discord (remove problematic unicode/control chars)
 def sanitize_output(text: str) -> str:
@@ -29,6 +33,17 @@ def sanitize_output(text: str) -> str:
     # Collapse very long whitespace
     text = re.sub(r"\s{3,}", ' ', text)
     return text
+
+# Helper function to run scripts with proper working directory
+def run_script(script_name, args):
+    """Run a Python script in the bot directory with proper working directory"""
+    return subprocess.run(
+        [sys.executable, script_name, *args],
+        cwd=str(BOT_DIR),
+        capture_output=True,
+        text=True,
+        timeout=30
+    )
 
 # additional imports for background tasks
 import asyncio
@@ -157,6 +172,12 @@ def get_ansi_color_code(level: int) -> str:
     else:
         return "\u001b[0;37m"  # Default White
 
+def make_bold_ansi(code: str) -> str:
+    """Convert a basic ANSI color code to bold variant.
+    Expects codes like "\u001b[0;33m" and returns "\u001b[1;33m".
+    """
+    return code.replace("[0;", "[1;")
+
 def load_tracked_users():
     if not os.path.exists(TRACKED_FILE):
         return []
@@ -241,7 +262,7 @@ async def run_get_for_users(flag: str):
             # run synchronously in thread to avoid blocking loop
             def call_combined():
                 # Single call: snapshot flag + refresh
-                return subprocess.run([sys.executable, "get.py", flag, "-refresh", "-ign", u], capture_output=True, text=True)
+                return run_script("get.py", [flag, "-refresh", "-ign", u])
             await asyncio.to_thread(call_combined)
             fetched.append(u)
         except Exception:
@@ -257,7 +278,7 @@ async def run_get_for_users_multi(flags: list[str]):
         try:
             def call_multi():
                 # Single call per user: all flags + refresh
-                return subprocess.run([sys.executable, "get.py", *flags, "-refresh", "-ign", u], capture_output=True, text=True)
+                return run_script("get.py", [*flags, "-refresh", "-ign", u])
             await asyncio.to_thread(call_multi)
             fetched.append(u)
         except Exception:
@@ -384,6 +405,7 @@ class StatsTabView(discord.ui.View):
         # Get prestige color based on level
         prestige_color = get_prestige_color(self.level_value)
         ansi_code = get_ansi_color_code(self.level_value)
+        bold_code = make_bold_ansi(ansi_code)
         reset_code = "\u001b[0;0m"
         
         embed = discord.Embed(
@@ -392,8 +414,8 @@ class StatsTabView(discord.ui.View):
         )
         
         # Add colored level display with full title as a full-width field
-        # Only the level and icon inside brackets are colored
-        colored_title = f"[{ansi_code}{self.level_value}{self.prestige_icon}{reset_code}] {self.ign} - {tab_name.title()} Stats"
+        # Both level and icon inside brackets are bold and colored
+        colored_title = f"[{bold_code}{self.level_value}{self.prestige_icon}{reset_code}] {self.ign} - {tab_name.title()} Stats"
         embed.add_field(name="", value=f"```ansi\n{colored_title}```", inline=False)
         
         # Add 6 inline fields: label as field name, data in compact code block
@@ -531,7 +553,9 @@ class LeaderboardView(discord.ui.View):
             for i, (player, value, level, icon) in enumerate(leaderboard[:10], 1):
                 medal = {1: "1.", 2: "2.", 3: "3."}.get(i, f"{i}.")
                 color_code = ansi_code(level)
-                prestige_display = f"{color_code}[{level}{icon}]{reset_code}"
+                bold_code = make_bold_ansi(color_code)
+                # Both level and icon inside brackets are bold and colored
+                prestige_display = f"{bold_code}[{level}{icon}]{reset_code}"
                 description_lines.append(f"{medal} {prestige_display} {player}: `{value}`")
             
             embed.description = f"```ansi\n" + "\n".join(description_lines) + "\n```"
@@ -628,7 +652,11 @@ async def on_ready():
 @bot.tree.command(name="verify", description="Create a player stats sheet")
 @discord.app_commands.describe(ign="Minecraft IGN")
 async def verify(interaction: discord.Interaction, ign: str):
-    await interaction.response.defer()
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
     
     try:
         # Get creator user
@@ -661,36 +689,48 @@ async def verify(interaction: discord.Interaction, ign: str):
         
         # Process based on approval
         if view.approved:
-            result = subprocess.run(
-                [sys.executable, "player_stats.py", "-ign", ign],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            result = run_script("player_stats.py", ["-ign", ign])
 
             if result.returncode == 0:
+                print(f"[OK] player_stats.py succeeded for {ign}")
+                
+                # Verify the sheet was actually created
+                from pathlib import Path
+                excel_file = BOT_DIR / "sheep_wars_stats.xlsx"
+                if not excel_file.exists():
+                    await interaction.followup.send(f"[ERROR] Excel file was not created after verification of {ign}.")
+                    return
+                
+                # Load and check if the sheet exists
+                try:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(str(excel_file))
+                    sheet_exists = False
+                    for sheet_name in wb.sheetnames:
+                        if sheet_name.casefold() == ign.casefold():
+                            sheet_exists = True
+                            break
+                    wb.close()
+                    
+                    if not sheet_exists:
+                        await interaction.followup.send(f"[ERROR] Sheet for {ign} was not created. Player stats file may be corrupted.")
+                        return
+                except Exception as e:
+                    await interaction.followup.send(f"[ERROR] Could not verify sheet creation: {str(e)}")
+                    return
+                
                 # add to tracked users list and link Discord account
                 added = add_tracked_user(ign)
                 link_user_to_ign(interaction.user.id, ign)
                 
                 # Fetch fresh all-time data (without lifetime flag to update all-time)
-                fetch_result = subprocess.run(
-                    [sys.executable, "get.py", "-ign", ign],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+                fetch_result = run_script("get.py", ["-ign", ign])
                 if fetch_result.returncode != 0:
                     print(f"[WARNING] Failed to fetch fresh data for {ign}: {fetch_result.stderr}")
                 
                 # Initialize all snapshots (session, daily, weekly, monthly) and deltas in one call
                 try:
-                    subprocess.run(
-                        [sys.executable, "get.py", "-session", "-daily", "-weekly", "-monthly", "-refresh", "-ign", ign],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
+                    run_script("get.py", ["-session", "-daily", "-weekly", "-monthly", "-refresh", "-ign", ign])
                     print(f"[OK] Initialized all snapshots for {ign}")
                 except Exception as e:
                     print(f"[WARNING] Failed to initialize snapshots for {ign}: {e}")
@@ -701,7 +741,10 @@ async def verify(interaction: discord.Interaction, ign: str):
                     await interaction.followup.send(f"Chuckegg has accepted the verification of {ign}, but {ign} is already being tracked! Your Discord account has been linked to it.")
             else:
                 err = (result.stderr or result.stdout) or "Unknown error"
-                await interaction.followup.send(f"Chuckegg has accepted the verification of {ign}, but an error occurred: {sanitize_output(err)}")
+                print(f"[ERROR] player_stats.py failed for {ign}:")
+                print(f"  stdout: {result.stdout}")
+                print(f"  stderr: {result.stderr}")
+                await interaction.followup.send(f"Chuckegg has accepted the verification of {ign}, but an error occurred creating the sheet:\n```{sanitize_output(err[:500])}```")
         else:
             await interaction.followup.send(f"Chuckegg has denied the verification of {ign}.")
             
@@ -713,7 +756,11 @@ async def verify(interaction: discord.Interaction, ign: str):
 @bot.tree.command(name="create", description="Create a session snapshot")
 @discord.app_commands.describe(ign="Minecraft IGN")
 async def create_session(interaction: discord.Interaction, ign: str):
-    await interaction.response.defer()
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
     
     # Check if user is authorized to create session for this username
     if not is_user_authorized(interaction.user.id, ign):
@@ -721,12 +768,7 @@ async def create_session(interaction: discord.Interaction, ign: str):
         return
     
     try:
-        result = subprocess.run(
-            [sys.executable, "create_session.py", "-ign", ign],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = run_script("create_session.py", ["-ign", ign])
 
         if result.returncode == 0:
             await interaction.followup.send(f"Session started for {ign}.")
@@ -741,7 +783,11 @@ async def create_session(interaction: discord.Interaction, ign: str):
 @bot.tree.command(name="delete", description="Delete your tracked username and all associated data")
 @discord.app_commands.describe(ign="Minecraft IGN to delete")
 async def delete_user(interaction: discord.Interaction, ign: str):
-    await interaction.response.defer()
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
     
     # Check if user is authorized to delete this username
     if not is_user_authorized(interaction.user.id, ign):
@@ -785,7 +831,11 @@ async def delete_user(interaction: discord.Interaction, ign: str):
 
 @bot.tree.command(name="dmme", description="Send yourself a test DM from the bot")
 async def dmme(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
     try:
         await interaction.user.send("Hello! This is a private message from the bot.")
         await interaction.followup.send("Sent you a DM.", ephemeral=True)
@@ -802,7 +852,11 @@ async def dmme(interaction: discord.Interaction):
     discord.app_commands.Choice(name="all (daily + weekly + monthly)", value="-all"),
 ])
 async def refresh(interaction: discord.Interaction, mode: discord.app_commands.Choice[str]):
-    await interaction.response.defer(ephemeral=True)
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            return
     try:
         if mode.value == "-all":
             # Single call per user: daily + weekly + monthly + refresh
@@ -833,19 +887,25 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
 @bot.tree.command(name="sheepwars", description="Get player stats with deltas")
 @discord.app_commands.describe(ign="Minecraft IGN")
 async def sheepwars(interaction: discord.Interaction, ign: str):
-    await interaction.response.defer()
+    # Defer FIRST, before any long operations
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            # Interaction expired or already acknowledged - nothing we can do
+            return
     
     try:
-        result = subprocess.run(
-            [sys.executable, "get.py", "-refresh", "-ign", ign],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        result = run_script("get.py", ["-refresh", "-ign", ign])
+        
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            await interaction.followup.send(f"[ERROR] Failed to fetch stats:\n```{error_msg[:500]}```")
+            return
         
         # Read Excel file and get stats
-        EXCEL_FILE = "sheep_wars_stats.xlsx"
-        if not os.path.exists(EXCEL_FILE):
+        EXCEL_FILE = BOT_DIR / "sheep_wars_stats.xlsx"
+        if not EXCEL_FILE.exists():
             await interaction.followup.send("[ERROR] Excel file not found")
             return
         
@@ -893,7 +953,13 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
     discord.app_commands.Choice(name="W/L Ratio", value="wlr"),
 ])
 async def leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
-    await interaction.response.defer()
+    # Defer FIRST, before any long operations
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except (discord.errors.NotFound, discord.errors.HTTPException):
+            # Interaction expired or already acknowledged - nothing we can do
+            return
     
     try:
         EXCEL_FILE = "sheep_wars_stats.xlsx"
