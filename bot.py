@@ -43,6 +43,120 @@ CREATOR_NAME = "chuckegg"  # case-insensitive match fallback
 CREATOR_ID = "542467909549555734"
 CREATOR_TZ = ZoneInfo("America/New_York")
 
+# Prestige icons per 100 levels (index 0 = levels 0-99)
+PRESTIGE_ICONS = [
+    "❤", "✙", "✫", "✈", "✠", "♙", "⚡", "☢", "✏", "☯",
+    "☃️", "۞", "✤", "♫", "♚", "❉", "Σ", "￡", "✖", "❁",
+    "✚", "✯", "✆", "❥", "☾⋆⁺", "⚜", "✦", "⚝", "✉", "ツ",
+    "❣", "✮", "✿", "✲", "❂", "ƒ", "$", "⋚⋚", "Φ", "✌",
+]
+
+# Prestige colors (RGB tuples for Discord embed colors)
+# Levels: 0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000+
+PRESTIGE_COLORS = {
+    0: (119, 119, 119),      # GRAY (§7)
+    100: (255, 255, 255),    # WHITE (§f)
+    200: (255, 85, 85),      # RED (§c)
+    300: (255, 170, 0),      # GOLD (§6)
+    400: (255, 255, 85),     # YELLOW (§e)
+    500: (85, 255, 85),      # LIGHT_GREEN (§a)
+    600: (0, 170, 170),      # DARK_AQUA (§3)
+    700: (170, 0, 170),      # DARK_PURPLE (§5)
+    800: (255, 85, 255),     # LIGHT_PURPLE (§d)
+    900: None,               # Rainbow (special handling)
+    1000: (255, 255, 255),   # WHITE (§f)
+    1100: (255, 255, 255),   # WHITE brackets and numbers
+    1200: (255, 85, 85),     # RED brackets and numbers
+    1300: (255, 170, 0),     # GOLD/ORANGE brackets and numbers
+    1400: (255, 255, 85),    # YELLOW brackets and numbers
+    1500: (85, 255, 85),     # GREEN brackets and numbers
+    1600: (85, 255, 255),    # CYAN brackets and numbers
+    1700: (255, 85, 255),    # MAGENTA brackets and numbers
+    1800: (255, 85, 255),    # PINK/MAGENTA brackets and numbers
+    1900: None,              # Rainbow (special handling)
+    2000: (170, 170, 170),   # GRAY/TAN brackets and numbers
+    2100: (255, 255, 255),   # WHITE brackets with gray numbers
+    2200: (255, 85, 85),     # RED brackets with yellow numbers
+    2300: None,              # Rainbow brackets
+    2400: (170, 0, 170),     # PURPLE brackets with green numbers
+    2500: (255, 255, 255),   # WHITE brackets with green numbers
+    2600: (255, 255, 255),   # WHITE brackets with cyan numbers
+    2700: (255, 255, 255),   # WHITE brackets with magenta numbers
+    2800: (255, 85, 85),     # RED brackets with dark red numbers
+    2900: None,              # Rainbow brackets
+    3000: (255, 255, 255),   # WHITE brackets with gray numbers
+    3100: (255, 255, 255),   # WHITE brackets and numbers
+    3200: (255, 85, 85),     # RED brackets and numbers
+    3300: None,              # Rainbow brackets (orange/red/yellow)
+    3400: None,              # Rainbow brackets (yellow/orange)
+    3500: (85, 255, 85),     # GREEN brackets and numbers
+    3600: (85, 255, 255),    # CYAN/BLUE brackets and numbers
+    3700: (255, 255, 255),   # WHITE/YELLOW brackets with magenta numbers
+    3800: None,              # Rainbow brackets (purple/red)
+    3900: None,              # Rainbow brackets (full spectrum)
+    4000: (255, 255, 255),   # WHITE brackets with black numbers
+}
+
+
+def get_prestige_icon(level: int) -> str:
+    try:
+        lvl = int(level)
+    except Exception:
+        lvl = 0
+    idx = max(0, lvl // 100)
+    if idx >= len(PRESTIGE_ICONS):
+        idx = len(PRESTIGE_ICONS) - 1
+    return PRESTIGE_ICONS[idx]
+
+def get_prestige_color(level: int) -> tuple:
+    """Get RGB color tuple for a given prestige level.
+    Supports levels 0-1000. Returns default dark gray for levels outside this range.
+    """
+    try:
+        lvl = int(level)
+    except Exception:
+        lvl = 0
+    
+    # Find the closest prestige level color
+    for prestige_level in sorted(PRESTIGE_COLORS.keys(), reverse=True):
+        if lvl >= prestige_level:
+            color = PRESTIGE_COLORS[prestige_level]
+            # Handle Rainbow (None) by returning a default color or cycling
+            if color is None:
+                # For now, return a vibrant color for rainbow
+                return (255, 100, 200)
+            return color
+    
+    # Fallback to gray if below 0
+    return (119, 119, 119)
+
+def get_ansi_color_code(level: int) -> str:
+    """Get ANSI color code for a given prestige level."""
+    color = get_prestige_color(level)
+    
+    # Map RGB to closest basic ANSI color for Discord compatibility
+    r, g, b = color
+    
+    # Determine which basic ANSI color is closest
+    if r > 200 and g > 200 and b > 200:
+        return "\u001b[0;37m"  # White
+    elif r < 100 and g < 100 and b < 100:
+        return "\u001b[0;30m"  # Gray
+    elif r > 200 and g < 100 and b < 100:
+        return "\u001b[0;31m"  # Red
+    elif r > 200 and g > 150 and b < 100:
+        return "\u001b[0;33m"  # Yellow/Gold
+    elif r < 100 and g > 200 and b < 100:
+        return "\u001b[0;32m"  # Green
+    elif r < 100 and g > 150 and b > 150:
+        return "\u001b[0;36m"  # Cyan
+    elif r > 150 and g < 100 and b > 150:
+        return "\u001b[0;35m"  # Magenta/Pink
+    elif r > 200 and g > 200 and b < 100:
+        return "\u001b[0;33m"  # Yellow
+    else:
+        return "\u001b[0;37m"  # Default White
+
 def load_tracked_users():
     if not os.path.exists(TRACKED_FILE):
         return []
@@ -231,10 +345,12 @@ async def scheduler_loop():
 
 # Helper class for stats tab view
 class StatsTabView(discord.ui.View):
-    def __init__(self, sheet, ign):
+    def __init__(self, sheet, ign, level_value: int, prestige_icon: str):
         super().__init__()
         self.sheet = sheet
         self.ign = ign
+        self.level_value = level_value
+        self.prestige_icon = prestige_icon
         self.current_tab = "all-time"
         
         # Row mappings: (kills_row, deaths_row, kd_row, wins_row, losses_row, wl_row)
@@ -265,10 +381,20 @@ class StatsTabView(discord.ui.View):
         losses = self.sheet[f"B{rows[4]}"].value or 0
         wl_ratio = self.sheet[f"B{rows[5]}"].value or 0
         
+        # Get prestige color based on level
+        prestige_color = get_prestige_color(self.level_value)
+        ansi_code = get_ansi_color_code(self.level_value)
+        reset_code = "\u001b[0;0m"
+        
         embed = discord.Embed(
-            title=f"{tab_name.title()} Stats - {self.ign}",
-            color=discord.Color.from_rgb(54, 57, 63)
+            title="",
+            color=discord.Color.from_rgb(*prestige_color)
         )
+        
+        # Add colored level display with full title as a full-width field
+        # Only the level and icon inside brackets are colored
+        colored_title = f"[{ansi_code}{self.level_value}{self.prestige_icon}{reset_code}] {self.ign} - {tab_name.title()} Stats"
+        embed.add_field(name="", value=f"```ansi\n{colored_title}```", inline=False)
         
         # Add 6 inline fields: label as field name, data in compact code block
         embed.add_field(name="Wins", value=f"```{str(wins)}```", inline=True)
@@ -725,8 +851,15 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
             await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
             return
         
+        # Pull level and prestige icon for title decoration
+        try:
+            level_value = int(found_sheet["D40"].value or 0)
+        except Exception:
+            level_value = 0
+        prestige_icon = get_prestige_icon(level_value)
+
         # Create view with tabs
-        view = StatsTabView(found_sheet, ign)
+        view = StatsTabView(found_sheet, ign, level_value, prestige_icon)
         embed = view.get_stats_embed("all-time")
         
         await interaction.followup.send(embed=embed, view=view)

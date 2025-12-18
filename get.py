@@ -63,10 +63,22 @@ wins, losses, wl, kills, deaths, kd = match.groups()
 
 # Extract Wool and Level (separate from Sheep Wars stats)
 wool_pattern = re.compile(r"Wool:\s*([\d,]+)", re.S)
+# Prefer the Level that appears immediately after the Wool stat (the Sheep Wars level),
+# fall back to the first Level match if not found.
 level_pattern = re.compile(r"Level:\s*([\d,]+)", re.S)
 
 wool_match = wool_pattern.search(text)
-level_match = level_pattern.search(text)
+level_match = None
+
+if wool_match:
+    # Look for a Level entry after the Wool line (within a reasonable window)
+    level_after_wool = level_pattern.search(text, wool_match.end())
+    if level_after_wool:
+        level_match = level_after_wool
+
+# Fallback to the first Level match anywhere in the page
+if level_match is None:
+    level_match = level_pattern.search(text)
 
 wool = wool_match.group(1) if wool_match else "0"
 level = level_match.group(1) if level_match else "0"
