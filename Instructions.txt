@@ -1,0 +1,4 @@
+1. player_stats.py -ign <username> --> creates the sheet
+2. get.py -ign <username> --> gets the initial data
+3. (optional) create_session.py -ign <username> --> creates a session
+4. view_stats.py -ign <username> --> updates the stats in the table
