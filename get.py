@@ -13,6 +13,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 parser = argparse.ArgumentParser(description="Fetch Sheep Wars stats")
 parser.add_argument("-ign", "--username", required=True, help="Minecraft IGN")
 parser.add_argument("-nolifetime", action="store_true", help="Don't update all-time stats in player sheet")
+parser.add_argument("-session", action="store_true", help="Log snapshot into Session Start section")
 parser.add_argument("-daily", action="store_true", help="Log snapshot into Daily Stats section")
 parser.add_argument("-weekly", action="store_true", help="Log snapshot into Weekly Stats section")
 parser.add_argument("-monthly", action="store_true", help="Log snapshot into Monthly Stats section")
@@ -60,6 +61,16 @@ if not match:
 
 wins, losses, wl, kills, deaths, kd = match.groups()
 
+# Extract Wool and Level (separate from Sheep Wars stats)
+wool_pattern = re.compile(r"Wool:\s*([\d,]+)", re.S)
+level_pattern = re.compile(r"Level:\s*([\d,]+)", re.S)
+
+wool_match = wool_pattern.search(text)
+level_match = level_pattern.search(text)
+
+wool = wool_match.group(1) if wool_match else "0"
+level = level_match.group(1) if level_match else "0"
+
 # -------------------
 # Terminal output
 # -------------------
@@ -71,6 +82,8 @@ if not args.nolifetime:
     print(f"  Kills  : {kills}")
     print(f"  Deaths : {deaths}")
     print(f"  K/D    : {kd}")
+    print(f"  Wool   : {wool}")
+    print(f"  Level  : {level}")
 
 # -------------------
 # Prepare Excel row
@@ -149,8 +162,13 @@ if found:
         for stat_name, (row_num, value) in stat_mapping.items():
             player_ws[f"B{row_num}"] = value
         
+        # Update Wool and Level in D39 and D40
+        player_ws["D39"] = int(wool.replace(",", ""))
+        player_ws["D40"] = int(level.replace(",", ""))
+        
         if not args.nolifetime:
             print(f"[OK] All-time stats updated in sheet '{USERNAME}'")
+            print(f"[OK] Wool: {wool}, Level: {level} saved to D39:D40")
     else:
         if not args.nolifetime:
             print(f"[SKIP] Skipped all-time stats update (-nolifetime flag)")
@@ -202,8 +220,24 @@ if found:
         if not args.nolifetime:
             print(f"[OK] Session stats updated for '{USERNAME}'")
     else:
+        # No snapshot found - create it automatically using current all-time stats
         if not args.nolifetime:
-            print(f"[WARNING] No snapshot found. Create one with create_session.py")
+            print(f"[INFO] No session snapshot found. Creating one now...")
+            # Write snapshot to D3:E8 (row 1 is title, row 2 is headers)
+            snapshot_vals = [
+                int(kills.replace(",", "")),
+                int(deaths.replace(",", "")),
+                float(kd),
+                int(wins.replace(",", "")),
+                int(losses.replace(",", "")),
+                float(wl),
+            ]
+            stat_names = ["Kills", "Deaths", "K/D", "Wins", "Losses", "W/L"]
+            for idx, stat_name in enumerate(stat_names):
+                r = 3 + idx  # Data starts at row 3
+                player_ws[f"D{r}"] = stat_name
+                player_ws[f"E{r}"] = snapshot_vals[idx]
+            print(f"[OK] Session snapshot created for '{USERNAME}'")
 
     # -------------------
     # Helper: ensure snapshot table exists and write values into D/E for a given section
@@ -249,6 +283,9 @@ if found:
             cell_e.border = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
 
     # Write snapshots to requested sections
+    if args.session:
+        # Session Start at row 1, headers 2, data 3-8
+        write_section_snapshot(1, 2, 3, "Session Start")
     if args.daily:
         # Daily title at row 10, headers 11, data 12-17
         write_section_snapshot(10, 11, 12, "Daily Start")

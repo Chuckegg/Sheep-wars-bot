@@ -89,6 +89,34 @@ def is_user_authorized(discord_user_id: int, ign: str) -> bool:
     key = ign.casefold()
     return links.get(key) == str(discord_user_id)
 
+def remove_tracked_user(ign: str) -> bool:
+    """Remove a username from tracked users list"""
+    users = load_tracked_users()
+    key = ign.casefold()
+    found = False
+    new_users = []
+    for u in users:
+        if u.casefold() == key:
+            found = True
+        else:
+            new_users.append(u)
+    
+    if found:
+        with open(TRACKED_FILE, "w", encoding="utf-8") as f:
+            for u in new_users:
+                f.write(u + "\n")
+    return found
+
+def unlink_user_from_ign(ign: str) -> bool:
+    """Remove username -> Discord user ID link"""
+    links = load_user_links()
+    key = ign.casefold()
+    if key in links:
+        del links[key]
+        save_user_links(links)
+        return True
+    return False
+
 async def run_get_for_users(flag: str):
     users = load_tracked_users()
     if not users:
@@ -97,9 +125,26 @@ async def run_get_for_users(flag: str):
     for u in users:
         try:
             # run synchronously in thread to avoid blocking loop
-            def call():
-                return subprocess.run([sys.executable, "get.py", flag, "-ign", u], capture_output=True, text=True)
-            result = await asyncio.to_thread(call)
+            def call_combined():
+                # Single call: snapshot flag + refresh
+                return subprocess.run([sys.executable, "get.py", flag, "-refresh", "-ign", u], capture_output=True, text=True)
+            await asyncio.to_thread(call_combined)
+            fetched.append(u)
+        except Exception:
+            continue
+    return fetched
+
+async def run_get_for_users_multi(flags: list[str]):
+    users = load_tracked_users()
+    if not users:
+        return users
+    fetched = []
+    for u in users:
+        try:
+            def call_multi():
+                # Single call per user: all flags + refresh
+                return subprocess.run([sys.executable, "get.py", *flags, "-refresh", "-ign", u], capture_output=True, text=True)
+            await asyncio.to_thread(call_multi)
             fetched.append(u)
         except Exception:
             continue
@@ -272,6 +317,125 @@ class StatsTabView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+# Leaderboard view for switching between periods
+class LeaderboardView(discord.ui.View):
+    def __init__(self, metric: str, wb):
+        super().__init__()
+        self.metric = metric  # "kills", "deaths", "kdr", "wins", "losses", "wlr"
+        self.wb = wb
+        self.current_period = "lifetime"
+        
+        # Row mappings for column B: (kills, deaths, kdr, wins, losses, wlr)
+        self.periods = {
+            "lifetime": (39, 40, 41, 42, 43, 44),
+            "session": (3, 4, 5, 6, 7, 8),
+            "daily": (12, 13, 14, 15, 16, 17),
+            "weekly": (21, 22, 23, 24, 25, 26),
+            "monthly": (30, 31, 32, 33, 34, 35),
+        }
+        # Map metric names to index in rows tuple
+        self.metric_indices = {
+            "kills": 0,
+            "deaths": 1,
+            "kdr": 2,
+            "wins": 3,
+            "losses": 4,
+            "wlr": 5,
+        }
+        self.metric_labels = {
+            "kills": "Kills",
+            "deaths": "Deaths",
+            "kdr": "K/D Ratio",
+            "wins": "Wins",
+            "losses": "Losses",
+            "wlr": "W/L Ratio",
+        }
+        self.update_buttons()
+    
+    def update_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == self.current_period:
+                    child.style = discord.ButtonStyle.primary
+                else:
+                    child.style = discord.ButtonStyle.secondary
+    
+    def get_leaderboard_embed(self, period: str):
+        rows = self.periods[period]
+        metric_idx = self.metric_indices[self.metric]
+        target_row = rows[metric_idx]
+        metric_label = self.metric_labels[self.metric]
+        
+        # Collect all player stats
+        leaderboard = []
+        for sheet_name in self.wb.sheetnames:
+            if sheet_name.casefold() == "sheep wars historical data":
+                continue
+            try:
+                sheet = self.wb[sheet_name]
+                value = sheet[f"B{target_row}"].value
+                if value is not None and isinstance(value, (int, float)):
+                    leaderboard.append((sheet_name, float(value)))
+            except Exception:
+                continue
+        
+        # Sort by value descending
+        leaderboard.sort(key=lambda x: x[1], reverse=True)
+        
+        # Build embed
+        embed = discord.Embed(
+            title=f"{period.title()} {metric_label} Leaderboard",
+            color=discord.Color.from_rgb(54, 57, 63)
+        )
+        
+        if not leaderboard:
+            embed.description = "No data available"
+        else:
+            # Top 10
+            description_lines = []
+            for i, (player, value) in enumerate(leaderboard[:10], 1):
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"**{i}.**")
+                description_lines.append(f"{medal} {player}: `{value}`")
+            embed.description = "\n".join(description_lines)
+        
+        return embed
+    
+    @discord.ui.button(label="Lifetime", custom_id="lifetime", style=discord.ButtonStyle.primary)
+    async def lifetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_period = "lifetime"
+        self.update_buttons()
+        embed = self.get_leaderboard_embed(self.current_period)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Session", custom_id="session", style=discord.ButtonStyle.secondary)
+    async def session_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_period = "session"
+        self.update_buttons()
+        embed = self.get_leaderboard_embed(self.current_period)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Daily", custom_id="daily", style=discord.ButtonStyle.secondary)
+    async def daily_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_period = "daily"
+        self.update_buttons()
+        embed = self.get_leaderboard_embed(self.current_period)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Weekly", custom_id="weekly", style=discord.ButtonStyle.secondary)
+    async def weekly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_period = "weekly"
+        self.update_buttons()
+        embed = self.get_leaderboard_embed(self.current_period)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Monthly", custom_id="monthly", style=discord.ButtonStyle.secondary)
+    async def monthly_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_period = "monthly"
+        self.update_buttons()
+        embed = self.get_leaderboard_embed(self.current_period)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 # Create bot with command tree for slash commands
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -371,16 +535,27 @@ async def verify(interaction: discord.Interaction, ign: str):
                 added = add_tracked_user(ign)
                 link_user_to_ign(interaction.user.id, ign)
                 
-                # Run get.py with -daily, -weekly, -monthly flags to initialize stats
+                # Fetch fresh all-time data (without lifetime flag to update all-time)
+                fetch_result = subprocess.run(
+                    [sys.executable, "get.py", "-ign", ign],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if fetch_result.returncode != 0:
+                    print(f"[WARNING] Failed to fetch fresh data for {ign}: {fetch_result.stderr}")
+                
+                # Initialize all snapshots (session, daily, weekly, monthly) and deltas in one call
                 try:
                     subprocess.run(
-                        [sys.executable, "get.py", "-daily", "-weekly", "-monthly", "-ign", ign],
+                        [sys.executable, "get.py", "-session", "-daily", "-weekly", "-monthly", "-refresh", "-ign", ign],
                         capture_output=True,
                         text=True,
                         timeout=30,
                     )
-                except Exception:
-                    pass  # Continue even if this fails
+                    print(f"[OK] Initialized all snapshots for {ign}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to initialize snapshots for {ign}: {e}")
                 
                 if added:
                     await interaction.followup.send(f"Chuckegg has accepted the verification of {ign}. {ign} is now verified, linked to your Discord account, and will be automatically tracked daily.")
@@ -425,6 +600,50 @@ async def create_session(interaction: discord.Interaction, ign: str):
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 
+@bot.tree.command(name="delete", description="Delete your tracked username and all associated data")
+@discord.app_commands.describe(ign="Minecraft IGN to delete")
+async def delete_user(interaction: discord.Interaction, ign: str):
+    await interaction.response.defer()
+    
+    # Check if user is authorized to delete this username
+    if not is_user_authorized(interaction.user.id, ign):
+        await interaction.followup.send(f"[ERROR] You are not authorized to delete {ign}. Only the user who verified this username can delete it.")
+        return
+    
+    try:
+        EXCEL_FILE = "sheep_wars_stats.xlsx"
+        
+        # Remove from tracked users
+        removed_tracked = remove_tracked_user(ign)
+        
+        # Remove from user links
+        removed_link = unlink_user_from_ign(ign)
+        
+        # Delete sheet from Excel file
+        sheet_deleted = False
+        if os.path.exists(EXCEL_FILE):
+            wb = load_workbook(EXCEL_FILE)
+            # Find sheet case-insensitively
+            key = ign.casefold()
+            found_sheet = None
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    found_sheet = sheet_name
+                    break
+            
+            if found_sheet:
+                del wb[found_sheet]
+                wb.save(EXCEL_FILE)
+                sheet_deleted = True
+        
+        if removed_tracked or removed_link or sheet_deleted:
+            await interaction.followup.send(f"Successfully deleted all data for {ign}. You are no longer tracked.")
+        else:
+            await interaction.followup.send(f"[WARNING] No data found for {ign}.")
+            
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] Failed to delete data: {str(e)}")
+
 
 @bot.tree.command(name="dmme", description="Send yourself a test DM from the bot")
 async def dmme(interaction: discord.Interaction):
@@ -437,21 +656,32 @@ async def dmme(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="refresh", description="Manually run daily/weekly/monthly fetch for all tracked users")
-@discord.app_commands.describe(mode="One of: daily, weekly, monthly")
+@discord.app_commands.describe(mode="One of: daily, weekly, monthly, or all")
 @discord.app_commands.choices(mode=[
     discord.app_commands.Choice(name="daily", value="-daily"),
     discord.app_commands.Choice(name="weekly", value="-weekly"),
     discord.app_commands.Choice(name="monthly", value="-monthly"),
+    discord.app_commands.Choice(name="all (daily + weekly + monthly)", value="-all"),
 ])
 async def refresh(interaction: discord.Interaction, mode: discord.app_commands.Choice[str]):
     await interaction.response.defer(ephemeral=True)
     try:
-        flag = mode.value
-        fetched = await run_get_for_users(flag)
-        if fetched:
-            msg = f"Fetched {flag} for usernames {', '.join(fetched)}."
+        if mode.value == "-all":
+            # Single call per user: daily + weekly + monthly + refresh
+            flags = ["-daily", "-weekly", "-monthly"]
+            fetched = await run_get_for_users_multi(flags)
+            if fetched:
+                msg = f"Fetched daily, weekly, and monthly for usernames {', '.join(set(fetched))}."
+            else:
+                msg = "No tracked users to refresh."
         else:
-            msg = "No tracked users to refresh."
+            flag = mode.value
+            fetched = await run_get_for_users(flag)
+            if fetched:
+                msg = f"Fetched {flag} for usernames {', '.join(fetched)}."
+            else:
+                msg = "No tracked users to refresh."
+        
         # Try to DM the invoking user directly
         try:
             await interaction.user.send(msg)
@@ -504,6 +734,37 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
         
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
+    except Exception as e:
+        await interaction.followup.send(f"[ERROR] {str(e)}")
+
+@bot.tree.command(name="leaderboard", description="View player leaderboards")
+@discord.app_commands.describe(metric="Choose a stat to rank players by")
+@discord.app_commands.choices(metric=[
+    discord.app_commands.Choice(name="Kills", value="kills"),
+    discord.app_commands.Choice(name="Deaths", value="deaths"),
+    discord.app_commands.Choice(name="K/D Ratio", value="kdr"),
+    discord.app_commands.Choice(name="Wins", value="wins"),
+    discord.app_commands.Choice(name="Losses", value="losses"),
+    discord.app_commands.Choice(name="W/L Ratio", value="wlr"),
+])
+async def leaderboard(interaction: discord.Interaction, metric: discord.app_commands.Choice[str]):
+    await interaction.response.defer()
+    
+    try:
+        EXCEL_FILE = "sheep_wars_stats.xlsx"
+        if not os.path.exists(EXCEL_FILE):
+            await interaction.followup.send("[ERROR] Excel file not found")
+            return
+        
+        wb = load_workbook(EXCEL_FILE)
+        
+        # Create view with period buttons
+        view = LeaderboardView(metric.value, wb)
+        embed = view.get_leaderboard_embed("lifetime")
+        
+        await interaction.followup.send(embed=embed, view=view)
+        # Note: wb is kept open for the view to use; consider closing after timeout
+        
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
 

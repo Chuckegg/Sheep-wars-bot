@@ -10,9 +10,11 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # -------------------
 parser = argparse.ArgumentParser(description="Create a session snapshot for a player")
 parser.add_argument("-ign", "--username", required=True, help="Minecraft IGN")
+parser.add_argument("-firstrun", action="store_true", help="First run - skip clearing existing session data")
 args = parser.parse_args()
 
 USERNAME = args.username
+FIRST_RUN = args.firstrun
 EXCEL_FILE = "sheep_wars_stats.xlsx"
 
 # -------------------
@@ -110,9 +112,10 @@ for col_idx, col_name in enumerate(cols):
     cell.border = border
     cell.alignment = center_alignment
 
-# Clear previous session stats (reset) - always clear when running this script
-for row in range(3, 9):
-    player_ws[f"B{row}"] = None
+# Clear previous session stats (reset) - skip on first run
+if not FIRST_RUN:
+    for row in range(3, 9):
+        player_ws[f"B{row}"] = None
 
 # Update snapshot values in rows 3-8
 for idx, (stat_value, stat_name) in enumerate(snapshot_data):
