@@ -492,7 +492,7 @@ class LeaderboardView(discord.ui.View):
         target_row = rows[metric_idx]
         metric_label = self.metric_labels[self.metric]
         
-        # Collect all player stats
+        # Collect all player stats with level info
         leaderboard = []
         for sheet_name in self.wb.sheetnames:
             if sheet_name.casefold() == "sheep wars historical data":
@@ -501,7 +501,13 @@ class LeaderboardView(discord.ui.View):
                 sheet = self.wb[sheet_name]
                 value = sheet[f"B{target_row}"].value
                 if value is not None and isinstance(value, (int, float)):
-                    leaderboard.append((sheet_name, float(value)))
+                    # Get level for prestige display
+                    try:
+                        level_value = int(sheet["D40"].value or 0)
+                    except Exception:
+                        level_value = 0
+                    prestige_icon = get_prestige_icon(level_value)
+                    leaderboard.append((sheet_name, float(value), level_value, prestige_icon))
             except Exception:
                 continue
         
@@ -517,12 +523,18 @@ class LeaderboardView(discord.ui.View):
         if not leaderboard:
             embed.description = "No data available"
         else:
-            # Top 10
+            # Top 10 with colored prestige prefix
             description_lines = []
-            for i, (player, value) in enumerate(leaderboard[:10], 1):
-                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"**{i}.**")
-                description_lines.append(f"{medal} {player}: `{value}`")
-            embed.description = "\n".join(description_lines)
+            ansi_code = get_ansi_color_code
+            reset_code = "\u001b[0;0m"
+            
+            for i, (player, value, level, icon) in enumerate(leaderboard[:10], 1):
+                medal = {1: "1.", 2: "2.", 3: "3."}.get(i, f"{i}.")
+                color_code = ansi_code(level)
+                prestige_display = f"{color_code}[{level}{icon}]{reset_code}"
+                description_lines.append(f"{medal} {prestige_display} {player}: `{value}`")
+            
+            embed.description = f"```ansi\n" + "\n".join(description_lines) + "\n```"
         
         return embed
     
