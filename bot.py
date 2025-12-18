@@ -299,7 +299,16 @@ class ApprovalView(discord.ui.View):
         await interaction.response.edit_message(content=f"You denied verification for {self.ign}.", view=None)
 
 # Bot token
-DISCORD_TOKEN = "harharscrewu"
+# Read from BOT_TOKEN.txt in the same directory
+TOKEN_FILE = os.path.join(os.path.dirname(__file__), "BOT_TOKEN.txt")
+try:
+    with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+        DISCORD_TOKEN = f.read().strip()
+except Exception as e:
+    DISCORD_TOKEN = None
+    print(f"[ERROR] Failed to read BOT_TOKEN.txt: {e}")
+if not DISCORD_TOKEN:
+    raise ValueError("BOT_TOKEN.txt is missing or empty")
 
 @bot.event
 async def on_ready():
@@ -361,6 +370,18 @@ async def verify(interaction: discord.Interaction, ign: str):
                 # add to tracked users list and link Discord account
                 added = add_tracked_user(ign)
                 link_user_to_ign(interaction.user.id, ign)
+                
+                # Run get.py with -daily, -weekly, -monthly flags to initialize stats
+                try:
+                    subprocess.run(
+                        [sys.executable, "get.py", "-daily", "-weekly", "-monthly", "-ign", ign],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                except Exception:
+                    pass  # Continue even if this fails
+                
                 if added:
                     await interaction.followup.send(f"Chuckegg has accepted the verification of {ign}. {ign} is now verified, linked to your Discord account, and will be automatically tracked daily.")
                 else:
@@ -489,4 +510,3 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
 # Run bot
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
-
