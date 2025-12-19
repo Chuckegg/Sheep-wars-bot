@@ -10,6 +10,7 @@ import json
 import gzip
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -32,7 +33,7 @@ parser.add_argument("-noproxy", action="store_true", help="Disable proxies (dire
 args = parser.parse_args()
 
 USERNAME = args.username
-URL = f"https://plancke.io/hypixel/player/stats/{USERNAME}"
+URL = f"https://plancke.io/hypixel/player/stats/{quote(USERNAME)}"
 
 # Rotating user agents to appear more like different browsers
 USER_AGENTS = [
@@ -237,7 +238,12 @@ def fetch_with_retry(url, headers, max_retries=3, initial_delay=2, use_proxies=T
                 # Small random delay even on first attempt to appear more human
                 time.sleep(random.uniform(0.5, 2.0))
             
-            response = session.get(url, headers=headers, proxies=proxy_dict, timeout=request_timeout)
+            # Rotate User-Agent on each attempt and add Referer
+            request_headers = headers.copy()
+            request_headers["User-Agent"] = random.choice(USER_AGENTS)
+            request_headers["Referer"] = "https://www.google.com/"
+            
+            response = session.get(url, headers=request_headers, proxies=proxy_dict, timeout=request_timeout)
             response.raise_for_status()
             return response
             
