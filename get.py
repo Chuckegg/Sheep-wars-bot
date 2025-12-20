@@ -393,9 +393,29 @@ def find_sheet_case_insensitive(workbook, name):
 # -------------------
 # Update player's personal sheet (All-time stats)
 # -------------------
+# Prepare a snapshot cache so refresh can prefer pre-write snapshots
+snapshot_cache = {}
 found = find_sheet_case_insensitive(wb, USERNAME)
 if found:
     player_ws = wb[found]
+    
+    # --- Cache existing snapshots before we write any new ones ---
+    def _read_snapshot_local(start_row):
+        stat_names_local = ["Kills", "Deaths", "K/D", "Wins", "Losses", "W/L"]
+        out_local = {}
+        for i_local, name_local in enumerate(stat_names_local):
+            val_local = player_ws[f"E{start_row + i_local}"].value
+            if val_local is None:
+                return None
+            out_local[name_local] = val_local
+        return out_local
+
+    snapshot_cache = {
+        "Session": _read_snapshot_local(3),
+        "Daily": _read_snapshot_local(12),
+        "Weekly": _read_snapshot_local(21),
+        "Monthly": _read_snapshot_local(30),
+    }
     
     # Update All-time stats if not disabled
     if not args.nolifetime:
@@ -564,8 +584,17 @@ else:
 if args.refresh and USERNAME in wb.sheetnames:
     player_ws = wb[USERNAME]
     
-    # helper to read snapshot values from D/E
-    def read_snapshot(start_row):
+    # helper to get snapshot values: prefer cached snapshots captured earlier
+    def read_snapshot(start_row, period_name=None):
+        if period_name is not None:
+            try:
+                cached = snapshot_cache.get(period_name)
+                if cached is not None:
+                    return cached
+            except NameError:
+                # snapshot_cache not defined; fall back to reading sheet
+                pass
+
         stat_names = ["Kills", "Deaths", "K/D", "Wins", "Losses", "W/L"]
         out = {}
         for i, name in enumerate(stat_names):
@@ -589,9 +618,41 @@ if args.refresh and USERNAME in wb.sheetnames:
         "Weekly": (21, 21),
         "Monthly": (30, 30),
     }
+
+    # --- Extra: ensure Daily deltas B12:B17 are updated by reading E12:E17 directly ---
+    try:
+        # Read snapshot values from E12:E17 (tolerate missing/None by treating as 0)
+        raw_snap = {}
+        for i, name in enumerate(stat_names):
+            raw_snap[name] = player_ws[f"E{12 + i}"].value or 0
+
+        # compute deltas
+        kills_delta = (all_time.get("Kills", 0) or 0) - (raw_snap.get("Kills", 0) or 0)
+        deaths_delta = (all_time.get("Deaths", 0) or 0) - (raw_snap.get("Deaths", 0) or 0)
+        wins_delta = (all_time.get("Wins", 0) or 0) - (raw_snap.get("Wins", 0) or 0)
+        losses_delta = (all_time.get("Losses", 0) or 0) - (raw_snap.get("Losses", 0) or 0)
+
+        # write counts and ratios into B12:B17
+        player_ws[f"B{12 + 0}"] = kills_delta
+        player_ws[f"B{12 + 1}"] = deaths_delta
+        if deaths_delta and deaths_delta != 0:
+            kd_ratio = kills_delta / deaths_delta
+        else:
+            kd_ratio = float(kills_delta) if kills_delta else 0.0
+        player_ws[f"B{12 + 2}"] = round(kd_ratio, 2)
+        player_ws[f"B{12 + 3}"] = wins_delta
+        player_ws[f"B{12 + 4}"] = losses_delta
+        if losses_delta and losses_delta != 0:
+            wl_ratio = wins_delta / losses_delta
+        else:
+            wl_ratio = float(wins_delta) if wins_delta else 0.0
+        player_ws[f"B{12 + 5}"] = round(wl_ratio, 2)
+    except Exception:
+        # if anything goes wrong, fall back to normal refresh loop below
+        pass
     
     for period, (snap_row, target_row) in periods.items():
-        snap = read_snapshot(snap_row)
+        snap = read_snapshot(snap_row, period)
         if snap is None:
             continue
         

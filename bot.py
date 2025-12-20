@@ -48,6 +48,8 @@ def run_script(script_name, args):
 # additional imports for background tasks
 import asyncio
 import datetime
+import random
+import time
 
 # tracked users file and creator identifier
 TRACKED_FILE = os.path.join(os.path.dirname(__file__), "tracked_users.txt")
@@ -284,6 +286,70 @@ async def run_get_for_users_multi(flags: list[str]):
         except Exception:
             continue
     return fetched
+
+
+async def run_refresh_for_users():
+    """Run get.py -refresh for every tracked user (no snapshot flags)."""
+    users = load_tracked_users()
+    if not users:
+        return users
+    fetched = []
+    for u in users:
+        try:
+            def call_refresh():
+                return run_script("get.py", ["-refresh", "-ign", u])
+            await asyncio.to_thread(call_refresh)
+            fetched.append(u)
+        except Exception:
+            continue
+    return fetched
+
+
+async def _delayed_refresh_user(username: str, delay: float):
+    """Sleep for `delay` seconds then run get.py -refresh for the given username."""
+    try:
+        await asyncio.sleep(delay)
+        await asyncio.to_thread(run_script, "get.py", ["-refresh", "-ign", username])
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        print(f"[REFRESH] Error refreshing {username}: {e}")
+
+
+async def staggered_stats_refresher(interval_minutes: int = 10):
+    """Background task that refreshes every tracked user's stats once per `interval_minutes`.
+
+    Each user's refresh is scheduled at a random point during the interval to spread load.
+    """
+    interval = interval_minutes * 60
+    buffer = 5  # seconds buffer to avoid scheduling at the very end
+    while True:
+        try:
+            users = load_tracked_users()
+            if not users:
+                await asyncio.sleep(interval)
+                continue
+
+            # assign a random delay in [0, interval-buffer) to each user, then schedule
+            tasks = []
+            for u in users:
+                d = random.uniform(0, max(0, interval - buffer))
+                tasks.append(asyncio.create_task(_delayed_refresh_user(u, d)))
+
+            # wait for the interval to elapse; leave any straggling tasks to finish in background
+            await asyncio.sleep(interval)
+
+            # optionally gather any finished tasks and suppress exceptions
+            for t in tasks:
+                if t.done():
+                    try:
+                        t.result()
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            print(f"[REFRESH] Staggered refresher error: {e}")
+            await asyncio.sleep(interval)
 
 async def send_fetch_message(message: str):
     # DM the creator (prefer explicit ID if set)
@@ -648,6 +714,10 @@ async def on_ready():
     if not getattr(bot, "scheduler_started", False):
         bot.loop.create_task(scheduler_loop())
         bot.scheduler_started = True
+    # start staggered stats refresher (every 10 minutes)
+    if not getattr(bot, "stats_refresher_started", False):
+        bot.loop.create_task(staggered_stats_refresher())
+        bot.stats_refresher_started = True
 
 @bot.tree.command(name="verify", description="Create a player stats sheet")
 @discord.app_commands.describe(ign="Minecraft IGN")
@@ -836,6 +906,24 @@ async def dmme(interaction: discord.Interaction):
             await interaction.response.defer(ephemeral=True)
         except (discord.errors.NotFound, discord.errors.HTTPException):
             return
+    # Owner-only guard: allow only CREATOR_ID or CREATOR_NAME to run this command
+    owner_allowed = False
+    if CREATOR_ID is not None:
+        try:
+            if int(CREATOR_ID) == interaction.user.id:
+                owner_allowed = True
+        except Exception:
+            pass
+    if not owner_allowed:
+        # fallback to name/display name match
+        try:
+            if interaction.user.name.casefold() == CREATOR_NAME.casefold() or interaction.user.display_name.casefold() == CREATOR_NAME.casefold():
+                owner_allowed = True
+        except Exception:
+            pass
+    if not owner_allowed:
+        await interaction.followup.send("Only the bot owner may run this command.", ephemeral=True)
+        return
     try:
         await interaction.user.send("Hello! This is a private message from the bot.")
         await interaction.followup.send("Sent you a DM.", ephemeral=True)
@@ -844,11 +932,12 @@ async def dmme(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="refresh", description="Manually run daily/weekly/monthly fetch for all tracked users")
-@discord.app_commands.describe(mode="One of: daily, weekly, monthly, or all")
+@discord.app_commands.describe(mode="One of: daily, weekly, monthly, stats, or all")
 @discord.app_commands.choices(mode=[
     discord.app_commands.Choice(name="daily", value="-daily"),
     discord.app_commands.Choice(name="weekly", value="-weekly"),
     discord.app_commands.Choice(name="monthly", value="-monthly"),
+    discord.app_commands.Choice(name="stats (refresh only)", value="-refresh"),
     discord.app_commands.Choice(name="all (daily + weekly + monthly)", value="-all"),
 ])
 async def refresh(interaction: discord.Interaction, mode: discord.app_commands.Choice[str]):
@@ -864,6 +953,12 @@ async def refresh(interaction: discord.Interaction, mode: discord.app_commands.C
             fetched = await run_get_for_users_multi(flags)
             if fetched:
                 msg = f"Fetched daily, weekly, and monthly for usernames {', '.join(set(fetched))}."
+            else:
+                msg = "No tracked users to refresh."
+        elif mode.value == "-refresh":
+            fetched = await run_refresh_for_users()
+            if fetched:
+                msg = f"Refreshed stats for usernames {', '.join(fetched)}."
             else:
                 msg = "No tracked users to refresh."
         else:
