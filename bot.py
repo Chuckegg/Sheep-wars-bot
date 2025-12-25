@@ -775,16 +775,18 @@ async def verify(interaction: discord.Interaction, ign: str):
                 try:
                     from openpyxl import load_workbook
                     wb = load_workbook(str(excel_file))
-                    sheet_exists = False
-                    for sheet_name in wb.sheetnames:
-                        if sheet_name.casefold() == ign.casefold():
-                            sheet_exists = True
-                            break
-                    wb.close()
-                    
-                    if not sheet_exists:
-                        await interaction.followup.send(f"[ERROR] Sheet for {ign} was not created. Player stats file may be corrupted.")
-                        return
+                    try:
+                        sheet_exists = False
+                        for sheet_name in wb.sheetnames:
+                            if sheet_name.casefold() == ign.casefold():
+                                sheet_exists = True
+                                break
+                        
+                        if not sheet_exists:
+                            await interaction.followup.send(f"[ERROR] Sheet for {ign} was not created. Player stats file may be corrupted.")
+                            return
+                    finally:
+                        wb.close()
                 except Exception as e:
                     await interaction.followup.send(f"[ERROR] Could not verify sheet creation: {str(e)}")
                     return
@@ -877,18 +879,21 @@ async def delete_user(interaction: discord.Interaction, ign: str):
         sheet_deleted = False
         if os.path.exists(EXCEL_FILE):
             wb = load_workbook(EXCEL_FILE)
-            # Find sheet case-insensitively
-            key = ign.casefold()
-            found_sheet = None
-            for sheet_name in wb.sheetnames:
-                if sheet_name.casefold() == key:
-                    found_sheet = sheet_name
-                    break
-            
-            if found_sheet:
-                del wb[found_sheet]
-                wb.save(EXCEL_FILE)
-                sheet_deleted = True
+            try:
+                # Find sheet case-insensitively
+                key = ign.casefold()
+                found_sheet = None
+                for sheet_name in wb.sheetnames:
+                    if sheet_name.casefold() == key:
+                        found_sheet = sheet_name
+                        break
+                
+                if found_sheet:
+                    del wb[found_sheet]
+                    wb.save(EXCEL_FILE)
+                    sheet_deleted = True
+            finally:
+                wb.close()
         
         if removed_tracked or removed_link or sheet_deleted:
             await interaction.followup.send(f"Successfully deleted all data for {ign}. You are no longer tracked.")
@@ -1005,32 +1010,33 @@ async def sheepwars(interaction: discord.Interaction, ign: str):
             return
         
         wb = load_workbook(EXCEL_FILE)
-        
-        # Find sheet case-insensitively
-        key = ign.casefold()
-        found_sheet = None
-        for sheet_name in wb.sheetnames:
-            if sheet_name.casefold() == key:
-                found_sheet = wb[sheet_name]
-                break
-        
-        if found_sheet is None:
-            await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
-            return
-        
-        # Pull level and prestige icon for title decoration
         try:
-            level_value = int(found_sheet["D40"].value or 0)
-        except Exception:
-            level_value = 0
-        prestige_icon = get_prestige_icon(level_value)
+            # Find sheet case-insensitively
+            key = ign.casefold()
+            found_sheet = None
+            for sheet_name in wb.sheetnames:
+                if sheet_name.casefold() == key:
+                    found_sheet = wb[sheet_name]
+                    break
+            
+            if found_sheet is None:
+                await interaction.followup.send(f"[ERROR] Player sheet '{ign}' not found")
+                return
+            
+            # Pull level and prestige icon for title decoration
+            try:
+                level_value = int(found_sheet["D40"].value or 0)
+            except Exception:
+                level_value = 0
+            prestige_icon = get_prestige_icon(level_value)
 
-        # Create view with tabs
-        view = StatsTabView(found_sheet, ign, level_value, prestige_icon)
-        embed = view.get_stats_embed("all-time")
-        
-        await interaction.followup.send(embed=embed, view=view)
-        wb.close()
+            # Create view with tabs
+            view = StatsTabView(found_sheet, ign, level_value, prestige_icon)
+            embed = view.get_stats_embed("all-time")
+            
+            await interaction.followup.send(embed=embed, view=view)
+        finally:
+            wb.close()
         
     except subprocess.TimeoutExpired:
         await interaction.followup.send("[ERROR] Command timed out (30s limit)")
@@ -1056,6 +1062,7 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
             # Interaction expired or already acknowledged - nothing we can do
             return
     
+    wb = None
     try:
         EXCEL_FILE = "sheep_wars_stats.xlsx"
         if not os.path.exists(EXCEL_FILE):
@@ -1073,6 +1080,9 @@ async def leaderboard(interaction: discord.Interaction, metric: discord.app_comm
         
     except Exception as e:
         await interaction.followup.send(f"[ERROR] {str(e)}")
+    finally:
+        if wb is not None:
+            wb.close()
 
 # Run bot
 if __name__ == "__main__":
